@@ -42,7 +42,7 @@ check_fluctuating_lambdas <- function(lambdas, first_direction) {
 # Return likelihood value of applying diffeomorphism
 # Also includes weight vector for WLB
 like_value <- function(betas, lambdas, sigma, input_X, 
-                       input_Y, first_direction, 
+                       input_Y, first_direction, interpolation,  
                        weight_vector = NULL, return_all = FALSE) {
   
   # If norm > pi, return infinity (invalid point)
@@ -65,7 +65,7 @@ like_value <- function(betas, lambdas, sigma, input_X,
   
   # Return diffeomorphism likelihood values for all (X, Y)
   all_log <- diffeo_all(input_X, input_Y, betas, b_vec, 
-                        lambdas, c(sigma),  interpolation = 'cubic', 
+                        lambdas, c(sigma),  interpolation = interpolation, 
                         transform_X = FALSE)
   
   # Return all likelihood values, the sum or 
@@ -147,15 +147,20 @@ process_post_samples_as_vec <- function(param_vec, num_betas, first_direction,
 # num_betas - integer, number of parameters for the diffeomorphism 
 # input_X - length n vector, transformed X points to be on 0-1 scale
 # input_Y - length n vector, Y points
+# first direction - 1 or -1, 1 if the difference between the function value the first 
+# stationary point and f(0) is positve, -1 if it is negative
 # zero_is_zero - boolean, TRUE if f(0) = 0, FALSE if f(0) needs to be estimated
+# interpolation - 'cubic' or 'linear', referring to interpolation type
 # weight_vector - NULL or n dimensional vector sum to 1, for WLB, calculates the weighted log likelihood 
 
 # Outputs:
 # log_like - Raw or Weighted Log Likelihood for (X, Y) data
 like_value_w_processing <- function(param_vec, num_betas,
                                     input_X, input_Y, first_direction,
-                                    zero_is_zero = FALSE,
-                                     weight_vector = NULL) {
+                                    zero_is_zero,
+                                    interpolation,
+                                     weight_vector = NULL, 
+                                    return_all = FALSE) {
   
   process_values <- process_post_samples(param_vec, num_betas, 
                                          first_direction, 
@@ -164,11 +169,10 @@ like_value_w_processing <- function(param_vec, num_betas,
   
   log_like <- like_value(process_values$betas, process_values$lambdas, 
                          process_values$sigma, 
-                         input_X, input_Y, first_direction, 
-                         weight_vector)
+                         input_X, input_Y, first_direction, interpolation,
+                         weight_vector, return_all)
   
   return(log_like)
-  
 }
 
 
@@ -181,26 +185,31 @@ like_value_w_processing <- function(param_vec, num_betas,
 # num_betas - integer, number of parameters for the diffeomorphism 
 # input_X - length n vector, transformed X points to be on 0-1 scale
 # input_Y - length n vector, Y points
-# zero_is_zero - boolean, TRUE if f(0) = 0, FALSE if f(0) needs to be estimated
-# weight_vector - NULL or n dimensional vector sum to 1, for WLB, calculates the weighted log likelihood 
+# first direction - 1 or -1, 1 if the difference between the function value the first 
+# stationary point and f(0) is positve, -1 if it is negative
 # prior_mean - p dimensional vector of prior mean (Joint Independent Normal)
 # prior_sd - p dimension vector of prior sds (Joint Independent Normal)
 # zero_is_zero - boolean, TRUE if f(0) = 0, FALSE if f(0) needs to be estimated
+# interpolation - 'cubic' or 'linear', referring to interpolation type
 # weight_vector - NULL or n dimensional vector sum to 1, for WLB, calculates the weighted log likelihood
+# w_0 - real number > 0, weight to add to prior 
 
 # Outputs:
 # log_like - Raw or Weighted Log Likelihood + Log Prior for (X, Y) data
 bayes_value <- function(param_vec, num_betas,
                                  input_X, input_Y, first_direction,
                                 prior_mean, prior_sd, 
-                        zero_is_zero = FALSE,
-                        weight_vector = NULL
+                        zero_is_zero,
+                        interpolation,
+                        weight_vector = NULL, 
+                        w_0 = 1
                        ) {
   
   # Get log likelihood
   log_like <- like_value_w_processing(param_vec, num_betas,
                                       input_X, input_Y, first_direction,
                                       zero_is_zero = zero_is_zero, 
+                                      interpolation = interpolation,
                                       weight_vector = weight_vector)
  
   
@@ -209,7 +218,7 @@ bayes_value <- function(param_vec, num_betas,
     return(log_like)
   } else{
 
-    log_prior <- sum(dnorm(param_vec, mean = prior_mean, 
+    log_prior <- sum(w_0 * dnorm(param_vec, mean = prior_mean, 
                            sd = prior_sd, log = TRUE))
     return(log_like + log_prior)
   }
@@ -218,149 +227,16 @@ bayes_value <- function(param_vec, num_betas,
 # Get negative of bayes_value, used for minimization
 neg_bayes_value <- function(param_vec, num_betas,
                             input_X, input_Y, first_direction,
-                            prior_mean, prior_sd, zero_is_zero = FALSE,
-                            weight_vector = NULL){
+                            prior_mean, prior_sd, zero_is_zero,
+                            interpolation,
+                            weight_vector = NULL, 
+                            w_0 = 1){
   
   return(-1 * bayes_value(param_vec, num_betas,
                           input_X, input_Y, first_direction,
                           prior_mean, prior_sd, 
-                          zero_is_zero,
-                          weight_vector))
+                          zero_is_zero, interpolation,
+                          weight_vector, 
+                          w_0))
 }
-
-# Given posterior samples, return stationary points and posterior estimates for E(Y|X_{i})
-
-# Inputs: 
-# posterior samples - m x p matrix of posterior samples
-# num_betas - integer, number of parameters for the diffeomorphism 
-# first direction - 1 or -1, 1 if the difference between the function value the first 
-# zero_is_zero - boolean, TRUE if f(0) = 0, FALSE if f(0) needs to be estimated
-
-# Outputs: 
-# stationary_points - m x num_stationary matrix of stationary point estimates
-# posterior_predictions - n x m matrix of posterior estimates of E(Y | X_{i})
-
-get_stat_points_predictions <- function(posterior_samples, num_betas, 
-                                  first_direction, 
-                                  zero_is_zero){
-  
-  
-  # Transform posterior samples
-  post_process_posterior <- t(apply(posterior_samples, 1,
-                                    process_post_samples_as_vec, 
-                                    num_betas = num_betas,
-                                    first_direction = first_direction, 
-                                    zero_is_zero = zero_is_zero))
-  
-  total_samples <- nrow(post_process_posterior)
-  ncol_post <- ncol(post_process_posterior)
-  
-  # Get Betas, Lambdas and B points
-  final_Betas <- post_process_posterior[, 1:num_betas]
-  final_Lambdas <- post_process_posterior[, (num_betas + 1):(ncol_post - 1)]
-  
-  final_BPoints <- matrix(rep(seq(0, 1, length.out = ncol(final_Lambdas)), total_samples), 
-                          nrow = total_samples, byrow = TRUE)
-  
-  # Obtain Posterior predictions for a grid of points
-  posterior_predictions <- diffeo_predictions(seq(0, 1, length.out = 500), 
-                                              final_Betas, final_BPoints,
-                                              final_Lambdas, 
-                                              interpolation = 'cubic',
-                                              transform_X = FALSE, 
-                                              return_diffeo = TRUE)
-  # Get mean posterior predictive values
-  b_vals <- final_BPoints[1, 2:(ncol(final_BPoints) - 1)]
-  
-  # Get new stationary points via interpolation
-  stat_points_fun <- function(diffeo_res){
-    return(interp1(x = diffeo_res, y = seq(0, 1, length.out = 500), 
-                   xi = b_vals, method = 'linear'))
-  }
-  
-  stationary_points <- t(apply(posterior_predictions$diffeomorphism, 
-                               2, stat_points_fun))
-  
-  # Return stationary points and posterior predictions 
-  return(list(stationary_points = stationary_points, 
-              posterior_predictions = posterior_predictions))
-}
-
-# Given data and vector of weights, estimate a weighted kernel density and calculated a
-# HPD interval
-kde_hpd_interval <- function(data_vec, weights, conf) {
-  
-  # Estimated weighted kde
-  kde_density <- density(data_vec, bw = "nrd", weights = weights, 
-                         n = 10000, from = 0, to = 1)
-  
-  # Estimate cdf via trapezoid area
-  heights <- diff(kde_density$x)
-  trapz_areas <- (kde_density$y[1:9999] + kde_density$y[2:10000])/2 * heights
-  cdf_estimate <- c(0, cumsum(trapz_areas))
-  
-  # Sample via inverse cdf method and calculate highest posterior density
-  icdf_sample <- approx(cdf_estimate, kde_density$x, runif(10000))$y
-
-  hdi_int <- hdi(icdf_sample, ci = conf)
-  
-  return(c(hdi_int$CI_low, hdi_int$CI_high))
-}
-
-# Create a credible interval for the endpoints from the weights 
-cred_interval <- function(data_vec, weights, endpoints){
-  
-  order_data_vec <- order(data_vec)
-  
-  # Create CDF
-  x_axis <- cumsum(weights[order_data_vec])
-  y_axis <- data_vec[order_data_vec]
-  
-  # Use linear interpolation to estimate CDF values 
-  return(interp1(x_axis, y_axis, endpoints, 'linear'))
-  
-  
-}
-
-# Create credible intervals for each posterior dimension from probability weights 
-
-# Inputs: 
-# posterior_samples - m x p dimensional matrix representing posterior samples
-# weights - p dimensional probability vector 
-# conf - number between 0 and 1, confidence level for credible interval 
-
-# Outputs:
-# cred_intervals - p posterior credible intervals at specified confidence level 
-weighted_cred_intervals <- function(posterior_samples, weights, conf) {
-  
-  alpha_val <- (1 - conf)/2
-  
-  endpoints <- c(alpha_val, 1 - alpha_val)
-  
-  cred_intervals <- apply(posterior_samples, 2, cred_interval, 
-                          weights = weights, endpoints = endpoints)
-  
-  return(cred_intervals)
-  
-}
-
-# Create HPD intervals for each posterior dimension from probability weights 
-
-# Inputs: 
-# posterior_samples - m x p dimensional matrix representing posterior samples
-# weights - p dimensional probability vector 
-# conf - number between 0 and 1, confidence level for HPD interval 
-
-# Outputs:
-# hpd_intervals - p posterior HPD intervals at specified confidence level 
-weighted_hpd_intervals <- function(posterior_samples, weights, conf) {
-  
-  hpd_intervals <- apply(posterior_samples, 2, kde_hpd_interval, 
-                         weights = weights, conf = conf)
-  
-  return(hpd_intervals)
-  
-}
-
-
 
